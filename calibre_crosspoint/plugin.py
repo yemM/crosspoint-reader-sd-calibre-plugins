@@ -48,7 +48,7 @@ class CrossPointDevice(DevicePlugin):
         'via SD card (Xteink X4 / CrossPoint firmware).'
     )
     author = 'CrossPoint Plugin'
-    version = (0, 1, 0)
+    version = (0, 2, 0)
     minimum_calibre_version = (6, 0, 0)
     supported_platforms = ['windows', 'osx', 'linux']
 
