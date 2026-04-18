@@ -30,3 +30,11 @@ def read_progress(cache_dir):
 
     spine_index, page_index = struct.unpack_from('<HH', data, 0)
     return {'spine_index': spine_index, 'page_index': page_index}
+
+
+def write_progress_bin(cache_dir, spine_index, page_index):
+    """Write progress.bin to *cache_dir* (4 bytes, little-endian uint16 × 2)."""
+    path = os.path.join(cache_dir, 'progress.bin')
+    data = struct.pack('<HH', int(spine_index), int(page_index))
+    with open(path, 'wb') as f:
+        f.write(data)

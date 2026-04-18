@@ -93,6 +93,26 @@ def write_progress(db, book_id, spine_index, page_index, progress_pct):
     _set(api, book_id, p['col_page'],     int(page_index))
 
 
+def read_progress_from_calibre(db, book_id):
+    """Read spine_index and page_index from Calibre custom columns.
+
+    Returns ``{'spine_index': int, 'page_index': int}`` or ``None`` if
+    either column is absent or has no value for this book.
+    """
+    p = _get_prefs()
+    api = db.new_api if hasattr(db, 'new_api') else db
+    spine_field = '#' + p.get('col_spine', 'cp_spine').lstrip('#')
+    page_field  = '#' + p.get('col_page',  'cp_page' ).lstrip('#')
+    try:
+        spine = api.field_for(spine_field, book_id)
+        page  = api.field_for(page_field,  book_id)
+        if spine is not None and page is not None:
+            return {'spine_index': int(spine), 'page_index': int(page)}
+    except Exception as exc:
+        print(f'[CrossPoint] Could not read progress columns: {exc}', file=sys.stderr)
+    return None
+
+
 def _set(api, book_id, label, value):
     """Write *value* to custom column *label* for *book_id* via the new API."""
     field_key = '#' + label.lstrip('#')

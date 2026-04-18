@@ -48,7 +48,7 @@ class CrossPointDevice(DevicePlugin):
         'via SD card (Xteink X4 / CrossPoint firmware).'
     )
     author = 'CrossPoint Plugin'
-    version = (0, 2, 0)
+    version = (0, 3, 0)
     minimum_calibre_version = (6, 0, 0)
     supported_platforms = ['windows', 'osx', 'linux']
 
@@ -266,6 +266,12 @@ class CrossPointDevice(DevicePlugin):
             )
             results.append((dest, on_card))
             print(f'[CrossPoint] Uploaded: {author}/{name} ({src_size} bytes)', file=sys.stderr)
+
+            db = _get_library_db()
+            if db is not None and mi is not None:
+                book_id = getattr(mi, 'application_id', None)
+                if book_id:
+                    _restore_progress_on_sd(self._sd_root, db, book_id, mi)
         return results
 
     @classmethod
@@ -494,6 +500,63 @@ class CrossPointDevice(DevicePlugin):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _restore_progress_on_sd(sd_root, db, book_id, mi):
+    """Write progress.bin to the matching SD cache dir for *book_id*, if stored progress exists.
+
+    Scans .crosspoint/epub_*/ dirs, matches by title+author against book.bin,
+    then writes the spine/page values from Calibre custom columns.
+    Silently skips when no cache dir is found (book never opened on CrossPoint).
+    """
+    from .calibre_sync.custom_columns import read_progress_from_calibre
+    from .crosspoint.book_bin_parser import parse_book_bin
+    from .crosspoint.progress_reader import write_progress_bin
+    from .calibre_sync.metadata_matcher import match_books
+
+    progress = read_progress_from_calibre(db, book_id)
+    if progress is None:
+        return
+
+    crosspoint_dir = os.path.join(sd_root, '.crosspoint')
+    if not os.path.isdir(crosspoint_dir):
+        return
+
+    sd_books = []
+    for d in os.listdir(crosspoint_dir):
+        if not d.startswith('epub_'):
+            continue
+        cache_dir = os.path.join(crosspoint_dir, d)
+        meta = parse_book_bin(cache_dir)
+        if meta:
+            sd_books.append({'title': meta.title, 'author': meta.author, 'cache_dir': cache_dir})
+
+    if not sd_books:
+        return
+
+    title  = mi.title or ''
+    author = (mi.authors[0] if mi and mi.authors else '') or ''
+    cal_entry = [{'calibre_id': book_id, 'title': title, 'author': author}]
+
+    for sd_book, matched in match_books(sd_books, cal_entry):
+        if matched is not None:
+            write_progress_bin(
+                sd_book['cache_dir'],
+                progress['spine_index'],
+                progress['page_index'],
+            )
+            print(
+                f"[CrossPoint] Restored progress spine={progress['spine_index']} "
+                f"page={progress['page_index']} → {sd_book['cache_dir']}",
+                file=sys.stderr,
+            )
+            return
+
+    print(
+        f'[CrossPoint] No cache dir found for "{title}" — progress not restored '
+        f'(book not yet opened on CrossPoint)',
+        file=sys.stderr,
+    )
+
 
 def _original_epub_path(mi):
     """Return the absolute path to the original EPUB in the Calibre library.
