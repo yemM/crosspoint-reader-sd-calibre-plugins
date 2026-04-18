@@ -24,6 +24,7 @@ The Xteink X4 does not expose USB mass storage — the SD card must be removed a
 - Calibre 6.0 or later
 - Python 3.8+ (bundled with Calibre)
 - A CrossPoint-formatted microSD card with a `.crosspoint/` directory
+- **FAT32 recommended over exFAT** — exFAT works for most books, but fragmented files can fail to open due to a SdFat cluster traversal limitation (reads silently stop after 8 KB). If an EPUB opens fine on your PC but not on the device, reformat the SD card as FAT32 and re-copy your books.
 
 ---
 
@@ -147,6 +148,7 @@ python3 tests/make_fixtures.py
 | Issue | Detail |
 |---|---|
 | No USB mass storage | The Xteink X4 requires physical SD card removal; no USB transfer |
+| exFAT fragmentation | exFAT works for most books, but fragmented files can silently fail to open (reads stop after 8 KB). FAT32 avoids this. |
 | Path-sensitive cache | Moving an EPUB on the card breaks its progress cache |
 | `book.bin` version | Parser targets format version 5; older firmware may differ |
 | Cache built on first open | Books never opened on the device have no progress data |
