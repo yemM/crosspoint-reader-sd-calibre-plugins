@@ -7,13 +7,14 @@ book.bin format (version 5, all integers little-endian):
   ------  -----  -----
   0x00    1      version byte (must be 5)
   0x01    4      LUT offset (uint32) — we skip via sequential reads
-  0x05    4      spine_count (uint32)
-  0x09    4      toc_count (uint32)
-  0x0D    var    title         — length-prefixed UTF-8 string (uint32 len + bytes)
+  0x05    2      spine_count (uint16)
+  0x07    2      toc_count (uint16)
+  0x09    var    title         — length-prefixed UTF-8 string (uint32 len + bytes)
   ...     var    author        — length-prefixed UTF-8 string
   ...     var    language      — length-prefixed UTF-8 string
   ...     var    cover_href    — length-prefixed UTF-8 string
   ...     var    text_ref_href — length-prefixed UTF-8 string
+  Then (spine_count + toc_count) × uint32 offsets — LUT; skipped.
   Then spine_count × SpineEntry:
     var   href              — length-prefixed UTF-8 string
     4     cumulative_size   — uint32 (cumulative page count before this chapter)
@@ -87,13 +88,19 @@ def parse_book_bin(cache_dir):
     Returns a :class:`BookMetadata` instance, or ``None`` on any error
     (file missing, wrong version, truncated data, etc.).
     """
+    import sys
     path = os.path.join(cache_dir, 'book.bin')
     if not os.path.isfile(path):
+        print(f'[CrossPoint] book.bin missing: {path}', file=sys.stderr)
         return None
     try:
         with open(path, 'rb') as f:
-            return _parse(f)
-    except Exception:
+            result = _parse(f)
+        if result is None:
+            print(f'[CrossPoint] book.bin parse returned None: {path}', file=sys.stderr)
+        return result
+    except Exception as exc:
+        print(f'[CrossPoint] book.bin parse error ({path}): {exc}', file=sys.stderr)
         return None
 
 
@@ -117,11 +124,11 @@ def _parse(f):
         return None
     # lut_offset = struct.unpack('<I', raw)[0]  # not used
 
-    # Counts
-    raw = f.read(8)
-    if len(raw) < 8:
+    # Counts — uint16 each, not uint32.
+    raw = f.read(4)
+    if len(raw) < 4:
         return None
-    spine_count, toc_count = struct.unpack('<II', raw)
+    spine_count, toc_count = struct.unpack('<HH', raw)
 
     # Metadata strings
     title = _read_string(f)
@@ -131,6 +138,13 @@ def _parse(f):
     text_ref_href = _read_string(f)
 
     if None in (title, author, language, cover_href, text_ref_href):
+        return None
+
+    # Skip the LUT (spine + TOC offset table) that sits between the header
+    # strings and the actual spine entry data.
+    lut_size = (spine_count + toc_count) * 4
+    lut_data = f.read(lut_size)
+    if len(lut_data) < lut_size:
         return None
 
     # Spine entries

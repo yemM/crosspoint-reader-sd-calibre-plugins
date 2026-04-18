@@ -68,6 +68,7 @@ class CrossPointDevice(DevicePlugin):
     # Internal state
     # ------------------------------------------------------------------
     _sd_root = None          # Absolute path to the mounted SD card
+    _prompt_sync = False     # Trigger sync-prompt on next books() call
 
     # ------------------------------------------------------------------
     # Device presence (MANAGES_DEVICE_PRESENCE = True)
@@ -95,6 +96,7 @@ class CrossPointDevice(DevicePlugin):
     def open(self, connected_device, library_uuid):
         """Store the SD card root path after Calibre detects the device."""
         self._sd_root = connected_device  # detect_managed_devices returns the path
+        self._prompt_sync = True
         print(f'[CrossPoint] Opened SD card at: {self._sd_root}', file=sys.stderr)
         db = _get_library_db()
         if db is not None:
@@ -206,6 +208,10 @@ class CrossPointDevice(DevicePlugin):
                 book.authors = ['Unknown']
 
             bl.append(book)
+
+        if self._prompt_sync:
+            self._prompt_sync = False
+            self._maybe_sync_on_connect()
 
         return bl
 
@@ -344,29 +350,32 @@ class CrossPointDevice(DevicePlugin):
         """
         if self._sd_root is None:
             return
-
         db = _get_library_db()
         if db is None:
             print('[CrossPoint] sync_booklists: could not reach library DB', file=sys.stderr)
             return
+        matched, unmatched = self._perform_sync(db)
+        print(
+            f'[CrossPoint] Sync complete: {matched} matched, {unmatched} unmatched',
+            file=sys.stderr,
+        )
 
+    def _perform_sync(self, db):
+        """Read SD progress, match to library, write columns. Returns (matched, unmatched)."""
         crosspoint_dir = os.path.join(self._sd_root, '.crosspoint')
         if not os.path.isdir(crosspoint_dir):
-            return
+            return 0, 0
 
-        # Collect all per-book cache directories
         cache_dirs = [
             os.path.join(crosspoint_dir, d)
             for d in os.listdir(crosspoint_dir)
-            if d.startswith('epub_')
-            and os.path.isdir(os.path.join(crosspoint_dir, d))
+            if d.startswith('epub_') and os.path.isdir(os.path.join(crosspoint_dir, d))
         ]
+        print(f'[CrossPoint] _perform_sync: {len(cache_dirs)} epub cache dir(s)', file=sys.stderr)
 
-        # Build list of SD books with metadata from book.bin
         sd_books = []
         for cache_dir in cache_dirs:
             meta = parse_book_bin(cache_dir)
-            progress = read_progress(cache_dir)
             if meta is None:
                 continue
             sd_books.append({
@@ -374,13 +383,10 @@ class CrossPointDevice(DevicePlugin):
                 'author': meta.author,
                 'cache_dir': cache_dir,
                 'meta': meta,
-                'progress': progress,
+                'progress': read_progress(cache_dir),
             })
 
-        # Fetch Calibre library books for matching
         calibre_books = _get_calibre_books(db)
-
-        # Match and write progress
         matched = 0
         unmatched = 0
         for sd_book, cal_book in match_books(sd_books, calibre_books):
@@ -402,29 +408,55 @@ class CrossPointDevice(DevicePlugin):
             page_index = progress['page_index']
             progress_pct = meta.progress_percent(spine_index, page_index)
 
-            write_progress(
-                db,
-                cal_book['calibre_id'],
-                spine_index,
-                page_index,
-                progress_pct,
-            )
+            write_progress(db, cal_book['calibre_id'], spine_index, page_index, progress_pct)
             matched += 1
             print(
-                f"[CrossPoint] Synced: {sd_book['title']} "
-                f"→ {progress_pct:.1f}%",
+                f"[CrossPoint] Synced: {sd_book['title']} → {progress_pct:.1f}%",
                 file=sys.stderr,
             )
 
-        # Commit all custom column writes at once
         try:
             api = db.new_api if hasattr(db, 'new_api') else db
             api.commit()
         except Exception:
             pass
 
+        return matched, unmatched
+
+    def _has_progress_data(self):
+        """Return True if at least one epub_* cache dir contains a progress.bin."""
+        if self._sd_root is None:
+            return False
+        crosspoint_dir = os.path.join(self._sd_root, '.crosspoint')
+        if not os.path.isdir(crosspoint_dir):
+            return False
+        try:
+            for d in os.listdir(crosspoint_dir):
+                if d.startswith('epub_') and os.path.isfile(
+                    os.path.join(crosspoint_dir, d, 'progress.bin')
+                ):
+                    return True
+        except OSError:
+            pass
+        return False
+
+    def _maybe_sync_on_connect(self):
+        """If progress data exists on SD, ask user and optionally sync. Runs in device thread."""
+        if not self._has_progress_data():
+            return
+        try:
+            from .ui.sync_prompt import ask_sync_prompt
+        except Exception as exc:
+            print(f'[CrossPoint] sync_prompt import failed: {exc}', file=sys.stderr)
+            return
+        if not ask_sync_prompt():
+            return
+        db = _get_library_db()
+        if db is None:
+            return
+        matched, unmatched = self._perform_sync(db)
         print(
-            f'[CrossPoint] Sync complete: {matched} matched, {unmatched} unmatched',
+            f'[CrossPoint] On-connect sync: {matched} matched, {unmatched} unmatched',
             file=sys.stderr,
         )
 
