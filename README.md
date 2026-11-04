@@ -13,7 +13,10 @@ Targets the **Xteink X4** running the [CrossPoint firmware](https://github.com/c
 
 The Xteink X4 does not expose USB mass storage — the SD card must be removed and inserted via an adapter. Once mounted, the plugin detects it by the presence of a `.crosspoint/` directory at the card root, then:
 
-1. Lists all EPUBs on the card for Calibre's device view
+1. Lists all EPUBs on the card for Calibre's device view. The plugin copies the
+   library's original EPUB, so its embedded UUID and title can lag behind edits made in
+   Calibre; `.crosspoint_calibre.json` at the card root records each book's library UUID,
+   title and authors when it is sent or recognised, so Calibre keeps matching it.
 2. Copies EPUBs to/from the card root on send/remove
 3. On sync, reads each book's `progress.bin` (current chapter + page) and `book.bin` (title, author, spine metadata), matches them to your Calibre library by title + author, and writes the progress values to custom columns
 
