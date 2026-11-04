@@ -13,11 +13,13 @@ Sync flow
 1. detect_managed_devices()  — called repeatedly by Calibre; returns device
                                handle when a CrossPoint SD is mounted.
 2. open()                    — stores the SD root path.
-3. books()                   — enumerates EPUBs present on the SD card.
+3. books()                   — enumerates EPUBs present on the SD card,
+                               taking library identity from the device cache.
 4. upload_books()            — copies EPUBs from Calibre to SD root.
 5. delete_books()            — removes EPUBs from SD card.
-6. sync_booklists()          — reads progress.bin / book.bin and writes
-                               progress back to Calibre custom columns.
+6. sync_booklists()          — refreshes the device cache, then reads
+                               progress.bin / book.bin and writes progress
+                               back to Calibre custom columns.
 """
 
 import hashlib
@@ -33,6 +35,7 @@ from .crosspoint.detector import find_crosspoint_mounts
 from .crosspoint.book_list import list_epubs
 from .crosspoint.progress_reader import read_progress
 from .crosspoint.book_bin_parser import parse_book_bin
+from .crosspoint import device_cache
 from .calibre_sync.metadata_matcher import match_books
 from .calibre_sync.custom_columns import write_progress, ensure_columns
 from .config.settings_widget import ConfigWidget
@@ -48,7 +51,7 @@ class CrossPointDevice(DevicePlugin):
         'via SD card (Xteink X4 / CrossPoint firmware).'
     )
     author = 'CrossPoint Plugin'
-    version = (0, 3, 0)
+    version = (0, 4, 0)
     minimum_calibre_version = (6, 0, 0)
     supported_platforms = ['windows', 'osx', 'linux']
 
@@ -184,6 +187,7 @@ class CrossPointDevice(DevicePlugin):
 
         from calibre.ebooks.metadata.epub import get_metadata
 
+        cache = device_cache.load_cache(self._sd_root)
         epub_list = list_epubs(self._sd_root)
         for i, entry in enumerate(epub_list):
             rel_path = os.path.relpath(entry['path'], self._sd_root)
@@ -200,6 +204,16 @@ class CrossPointDevice(DevicePlugin):
             book = Book(self._sd_root, rel_path, size=entry['size'], other=mi)
             book.path = entry['path']
             book.datetime = time.gmtime(entry['mtime'])
+
+            # The OPF keeps the UUID/title the file had when it entered the
+            # library; prefer what the library said when it last saw the book.
+            cached = device_cache.lookup(cache, rel_path, entry['size'])
+            if cached is not None:
+                book.uuid = cached['uuid']
+                if cached['title']:
+                    book.title = cached['title']
+                if cached['authors']:
+                    book.authors = cached['authors']
 
             # Fall back to filename if EPUB has no title
             if not book.title:
@@ -230,6 +244,7 @@ class CrossPointDevice(DevicePlugin):
             return []
         metadata = list(metadata) if metadata else [None] * len(files)
         results = []
+        uploaded = {}
         for src, name, mi in zip(files, names, metadata):
             # Use the original EPUB from the Calibre library rather than
             # the temp file Calibre prepared (which has UUID, cover pages,
@@ -266,12 +281,21 @@ class CrossPointDevice(DevicePlugin):
             )
             results.append((dest, on_card))
             print(f'[CrossPoint] Uploaded: {author}/{name} ({src_size} bytes)', file=sys.stderr)
+            if mi is not None and getattr(mi, 'uuid', None):
+                uploaded[os.path.relpath(dest, self._sd_root)] = device_cache.make_entry(
+                    mi.uuid, mi.title, mi.authors, os.path.getsize(dest))
 
             db = _get_library_db()
             if db is not None and mi is not None:
                 book_id = getattr(mi, 'application_id', None)
                 if book_id:
                     _restore_progress_on_sd(self._sd_root, db, book_id, mi)
+
+        if uploaded:
+            cache = device_cache.load_cache(self._sd_root)
+            for lpath, entry in uploaded.items():
+                cache[device_cache.cache_key(lpath)] = entry
+            device_cache.save_cache(self._sd_root, cache)
         return results
 
     @classmethod
@@ -360,11 +384,47 @@ class CrossPointDevice(DevicePlugin):
         if db is None:
             print('[CrossPoint] sync_booklists: could not reach library DB', file=sys.stderr)
             return
+        self._refresh_device_cache(booklists[0], db)
         matched, unmatched = self._perform_sync(db)
         print(
             f'[CrossPoint] Sync complete: {matched} matched, {unmatched} unmatched',
             file=sys.stderr,
         )
+
+    def _refresh_device_cache(self, booklist, db):
+        """Record the library identity of every book Calibre recognised.
+
+        Calibre calls sync_booklists after uploads and deletions, once it has
+        matched the device books to the library (setting application_id).
+        """
+        try:
+            api = db.new_api if hasattr(db, 'new_api') else db
+            files = {
+                os.path.relpath(e['path'], self._sd_root): e['size']
+                for e in list_epubs(self._sd_root)
+            }
+            resolved = {}
+            for book in booklist:
+                path = getattr(book, 'path', '')
+                if not path:
+                    continue
+                book_id = getattr(book, 'application_id', None)
+                if book_id is None and getattr(book, 'uuid', None):
+                    book_id = api.lookup_by_uuid(book.uuid)
+                if book_id is None:
+                    continue
+                uuid = api.field_for('uuid', book_id)
+                if not uuid:
+                    continue
+                resolved[os.path.relpath(path, self._sd_root)] = device_cache.make_entry(
+                    uuid, api.field_for('title', book_id), api.field_for('authors', book_id), 0)
+            old = device_cache.load_cache(self._sd_root)
+            new = device_cache.merge(old, files, resolved)
+            if new != old:
+                device_cache.save_cache(self._sd_root, new)
+            print(f'[CrossPoint] Device cache: {len(new)} book(s) identified', file=sys.stderr)
+        except Exception as exc:
+            print(f'[CrossPoint] Device cache refresh failed: {exc}', file=sys.stderr)
 
     def _perform_sync(self, db):
         """Read SD progress, match to library, write columns. Returns (matched, unmatched)."""
